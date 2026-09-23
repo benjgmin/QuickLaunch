@@ -4,7 +4,7 @@ A lightweight, keyboard-driven launcher for macOS, built with SwiftUI and AppKit
 
 Hit `⌘⇧Space` from anywhere, type, hit enter.
 
-<!-- Add a demo gif here, e.g. ![demo](docs/demo.gif) -->
+![demo](docs/quicklaunch-demo.gif)
 
 ## Features
 
