@@ -47,7 +47,7 @@ Hit `⌘⇧Space` from anywhere, type, hit enter.
 Requirements: macOS 14+, Xcode 15+
 
 ```bash
-git clone https://github.com/YOURUSERNAME/QuickLaunch.git
+git clone https://github.com/benjgmin/QuickLaunch.git
 cd QuickLaunch
 open QuickLaunch.xcodeproj
 ```
