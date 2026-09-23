@@ -482,16 +482,29 @@ struct SearchView: View {
     
     func launchApp(_ app: AppInfo) {
         viewModel.addToRecent(app)
-        
-        if app.isFile {
-            // For executable files (.command, scripts, etc), open them directly
-            // .command files will open in Terminal automatically on macOS
-            NSWorkspace.shared.open(URL(fileURLWithPath: app.path))
+        let url = URL(fileURLWithPath: app.path)
+
+        if app.isFile && isRunnableScript(app.path) {
+            // force scripts to run in terminal instead of opening in an editor
+            let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+            NSWorkspace.shared.open([url], withApplicationAt: terminal,
+                                    configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                if let error { print("launch failed: \(error)") }
+            }
         } else {
-            // For .app bundles, open normally
-            NSWorkspace.shared.open(URL(fileURLWithPath: app.path))
+            NSWorkspace.shared.open(url)
         }
-        
+
         onEscape()
+    }
+
+    func isRunnableScript(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+            return false
+        }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ["command", "sh", "bash", "zsh", "py", "rb", "pl"].contains(ext) { return true }
+        return FileManager.default.isExecutableFile(atPath: path)
     }
 }
