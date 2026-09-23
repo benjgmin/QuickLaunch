@@ -131,78 +131,21 @@ class SearchViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Calculator
+    
     var calculatorResult: String? {
         guard searchText.hasPrefix("=") else { return nil }
-        let expression = String(searchText.dropFirst()).trimmingCharacters(in: .whitespaces)
-        if expression.isEmpty { return nil }
+        let expression = searchText.dropFirst().trimmingCharacters(in: .whitespaces)
+        guard !expression.isEmpty, let value = MathEvaluator.evaluate(expression) else { return nil }
         
-        var sanitized = expression
-            .replacingOccurrences(of: "x", with: "*")
-            .replacingOccurrences(of: "×", with: "*")
-            .replacingOccurrences(of: "÷", with: "/")
-            .replacingOccurrences(of: " ", with: "")
-            .replacingOccurrences(of: "sqrt(", with: "√(")
-        
-        if let last = sanitized.last, "+-*/(√".contains(last) {
-            return nil
-        }
-        
-        let openCount = sanitized.filter { $0 == "(" }.count
-        let closeCount = sanitized.filter { $0 == ")" }.count
-        if openCount != closeCount {
-            return nil
-        }
-        
-        return evaluateMath(sanitized)
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 6
+        formatter.usesGroupingSeparator = false  // copy "1234", not "1,234"
+        return formatter.string(from: NSNumber(value: value))
     }
     
-    func evaluateMath(_ expression: String) -> String? {
-        var bcExpression = expression
-            .replacingOccurrences(of: "√(", with: "sqrt(")
-        
-        let fullExpression = "scale=10; " + bcExpression
-        
-        let task = Process()
-        let pipe = Pipe()
-        
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/bc")
-        task.arguments = ["-l"]
-        task.standardInput = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        
-        do {
-            try task.run()
-            
-            if let inputPipe = task.standardInput as? Pipe {
-                let input = fullExpression + "\n"
-                inputPipe.fileHandleForWriting.write(input.data(using: .utf8)!)
-                inputPipe.fileHandleForWriting.closeFile()
-            }
-            
-            task.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                if let num = Double(output) {
-                    if num == Double(Int(num)) {
-                        return String(format: "%.0f", num)
-                    } else {
-                        let formatter = NumberFormatter()
-                        formatter.numberStyle = .decimal
-                        formatter.maximumFractionDigits = 6
-                        formatter.minimumFractionDigits = 0
-                        return formatter.string(from: NSNumber(value: num))
-                    }
-                }
-                return output
-            }
-        } catch {
-            return nil
-        }
-        
-        return nil
-    }
+    // MARK: - Query parsing
     
     var searchQuery: String {
         if searchText.hasPrefix("g ") {
@@ -259,6 +202,8 @@ class SearchViewModel: ObservableObject {
         }
     }
     
+    // MARK: - App & file search
+    
     var filteredApps: [AppInfo] {
         if searchText.isEmpty {
             return recentApps
@@ -269,26 +214,19 @@ class SearchViewModel: ObservableObject {
         }
         
         let searchLower = searchText.lowercased()
-        print("🔎 Searching for: '\(searchText)' (mode: \(currentMode))")
         
-        // First, search our cached apps and files
+        // Score cached apps/files: exact > prefix > substring > fuzzy
         let scored = apps.compactMap { app -> (AppInfo, Int)? in
             let nameLower = app.name.lowercased()
             
-            // Exact match (full name)
             if nameLower == searchLower {
                 return (app, 100)
-            }
-            // Starts with query
-            else if nameLower.hasPrefix(searchLower) {
+            } else if nameLower.hasPrefix(searchLower) {
                 return (app, 80)
-            }
-            // Contains query
-            else if nameLower.contains(searchLower) {
+            } else if nameLower.contains(searchLower) {
                 return (app, 60)
-            }
-            // Fuzzy match (subsequence)
-            else {
+            } else {
+                // Fuzzy match: query characters appear in order
                 var searchIndex = searchLower.startIndex
                 for char in nameLower {
                     if searchIndex < searchLower.endIndex && char == searchLower[searchIndex] {
@@ -303,40 +241,22 @@ class SearchViewModel: ObservableObject {
         }
         
         var results = scored.sorted { $0.1 > $1.1 }.map { $0.0 }
-        print("📦 Found \(results.count) cached results")
         
-        // If we have fewer than 5 results, use mdfind to search for files system-wide
-        // Lowered to 2 chars so partial names work
+        // Fall back to Spotlight when the cache comes up short
         if results.count < 5 && searchText.count >= 2 {
-            print("🔍 Triggering spotlight search (only \(results.count) cached results, query length: \(searchText.count))")
             let additionalFiles = searchFilesWithSpotlight(query: searchText)
-            print("✨ Spotlight returned \(additionalFiles.count) files")
-            // Only add files that aren't already in results
-            for file in additionalFiles {
-                if !results.contains(where: { $0.path == file.path }) {
-                    results.append(file)
-                }
+            for file in additionalFiles where !results.contains(where: { $0.path == file.path }) {
+                results.append(file)
             }
-        } else {
-            print("⏭️ Skipping spotlight (have \(results.count) results, query length: \(searchText.count))")
         }
         
-        print("✅ Returning \(results.prefix(7).count) total results")
         return Array(results.prefix(7))
     }
     
     func searchFilesWithSpotlight(query: String) -> [AppInfo] {
-        print("🔍 Searching spotlight for: \(query)")
-        
         var foundFiles: [AppInfo] = []
+        let realHome = FileManager.default.homeDirectoryForCurrentUser.path
         
-        // Get REAL user directories, not sandboxed ones
-        let fm = FileManager.default
-        let realHome = fm.homeDirectoryForCurrentUser.path
-        
-        print("🏠 Real home directory: \(realHome)")
-        
-        // Search in multiple locations
         let searchLocations = [
             realHome + "/Downloads",
             realHome + "/Desktop",
@@ -349,15 +269,13 @@ class SearchViewModel: ObservableObject {
             let pipe = Pipe()
             
             task.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
-            // Use kMDItemFSName for filename search - more reliable than -name
+            // Case-insensitive filename match (more reliable than mdfind -name)
             task.arguments = [
                 "kMDItemFSName == '*\(query)*'c",
                 "-onlyin", location
             ]
             task.standardOutput = pipe
             task.standardError = FileHandle.nullDevice
-            
-            print("🔎 Searching in: \(location)")
             
             do {
                 try task.run()
@@ -366,25 +284,20 @@ class SearchViewModel: ObservableObject {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let output = String(data: data, encoding: .utf8) {
                     let paths = output.split(separator: "\n").map(String.init)
-                    print("📁 mdfind found \(paths.count) results in \(location)")
                     
-                    for path in paths.prefix(5) {  // Take top 5 from each location
-                        print("  - Checking: \(path)")
+                    for path in paths.prefix(5) {
                         let url = URL(fileURLWithPath: path)
                         let ext = url.pathExtension.lowercased()
                         
                         // Skip directories and hidden files
                         var isDirectory: ObjCBool = false
                         if !FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) || isDirectory.boolValue {
-                            print("    ❌ Skipped (directory or doesn't exist)")
                             continue
                         }
                         if url.lastPathComponent.hasPrefix(".") {
-                            print("    ❌ Skipped (hidden)")
                             continue
                         }
                         
-                        // Include known script extensions OR any executable file
                         let isScriptExt = ["command", "sh", "bash", "zsh", "py", "rb", "pl", "js", "swift"].contains(ext)
                         
                         var isExecutable = false
@@ -393,49 +306,38 @@ class SearchViewModel: ObservableObject {
                             isExecutable = (permissions.uint16Value & 0o111) != 0
                         }
                         
-                        print("    ext=\(ext), isScriptExt=\(isScriptExt), isExecutable=\(isExecutable)")
-                        
-                        // Show if it's a script extension OR has executable permissions OR has no extension (might be a binary)
+                        // Scripts, executables, or extensionless files (likely binaries)
                         if isScriptExt || isExecutable || ext.isEmpty {
-                            let name = url.lastPathComponent  // Use full name including extension
+                            let name = url.lastPathComponent
                             let icon = NSWorkspace.shared.icon(forFile: path)
                             
-                            // Don't add duplicates
                             if !foundFiles.contains(where: { $0.path == path }) {
                                 foundFiles.append(AppInfo(name: name, path: path, icon: icon, isFile: true))
-                                print("    ✅ Added to results")
-                            } else {
-                                print("    ⏭️ Skipped (duplicate)")
                             }
-                        } else {
-                            print("    ❌ Filtered out")
                         }
                     }
                 }
             } catch {
-                print("❌ mdfind failed for \(location): \(error)")
+                #if DEBUG
+                print("mdfind failed for \(location): \(error)")
+                #endif
             }
             
-            // Stop searching other locations if we found enough results
             if foundFiles.count >= 5 {
                 break
             }
         }
         
-        print("✅ Spotlight search complete, returning \(foundFiles.count) files")
         return foundFiles
     }
     
+    // MARK: - Indexing
+    
     func loadApps() {
         var foundApps: [AppInfo] = []
+        let realHome = FileManager.default.homeDirectoryForCurrentUser.path
         
-        // Get REAL user directories
-        let fm = FileManager.default
-        let realHome = fm.homeDirectoryForCurrentUser.path
-        
-        print("🏠 Loading apps from real home: \(realHome)")
-        
-        // Load .app bundles
+        // .app bundles
         let appDirs = [
             "/Applications",
             "/System/Applications",
@@ -454,10 +356,7 @@ class SearchViewModel: ObservableObject {
             }
         }
         
-        print("📱 Loaded \(foundApps.count) .app bundles")
-        
-        // Load executable files from home directory (scripts, .command files, etc)
-        // Downloads first since that's where most stuff is
+        // Scripts and executables in common user folders
         let homeDirs = [
             realHome + "/Downloads",
             realHome + "/Desktop",
@@ -478,7 +377,7 @@ class SearchViewModel: ObservableObject {
             ) else { continue }
             
             for case let fileURL as URL in enumerator {
-                // Limit depth to avoid slow scans
+                // Limit depth to keep the scan fast
                 let depth = fileURL.pathComponents.count - URL(fileURLWithPath: dir).pathComponents.count
                 if depth > 3 {
                     enumerator.skipDescendants()
@@ -489,16 +388,14 @@ class SearchViewModel: ObservableObject {
                 let item = fileURL.lastPathComponent
                 let ext = fileURL.pathExtension.lowercased()
                 
-                // Skip already-found .app bundles
+                // .app bundles were already collected above
                 if ext == "app" { continue }
                 
-                // Check if it's an executable file by extension
                 if executableExtensions.contains(ext) {
                     let name = (item as NSString).deletingPathExtension
                     let icon = NSWorkspace.shared.icon(forFile: path)
                     foundApps.append(AppInfo(name: name, path: path, icon: icon, isFile: true))
                 } else if !item.hasPrefix(".") {
-                    // Check if file has executable permissions
                     if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
                        let permissions = attrs[.posixPermissions] as? NSNumber {
                         let isExecutable = (permissions.uint16Value & 0o111) != 0
@@ -513,6 +410,8 @@ class SearchViewModel: ObservableObject {
         
         apps = foundApps.sorted { $0.name.lowercased() < $1.name.lowercased() }
     }
+    
+    // MARK: - Clipboard
     
     func startClipboardMonitor() {
         clipboardTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
@@ -530,6 +429,13 @@ class SearchViewModel: ObservableObject {
             }
         }
     }
+    
+    func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+    
+    // MARK: - Selection
     
     func clear() {
         searchText = ""
@@ -553,6 +459,8 @@ class SearchViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Recents
+    
     func addToRecent(_ app: AppInfo) {
         recentApps.removeAll { $0.path == app.path }
         recentApps.insert(app, at: 0)
@@ -573,19 +481,12 @@ class SearchViewModel: ObservableObject {
         }
         
         var loaded: [AppInfo] = []
-        for path in paths {
-            if FileManager.default.fileExists(atPath: path) {
-                let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-                let icon = NSWorkspace.shared.icon(forFile: path)
-                let isFile = !path.hasSuffix(".app")
-                loaded.append(AppInfo(name: name, path: path, icon: icon, isFile: isFile))
-            }
+        for path in paths where FileManager.default.fileExists(atPath: path) {
+            let name = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+            let icon = NSWorkspace.shared.icon(forFile: path)
+            let isFile = !path.hasSuffix(".app")
+            loaded.append(AppInfo(name: name, path: path, icon: icon, isFile: isFile))
         }
         recentApps = loaded
-    }
-    
-    func copyToClipboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
     }
 }

@@ -489,7 +489,9 @@ struct SearchView: View {
             let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
             NSWorkspace.shared.open([url], withApplicationAt: terminal,
                                     configuration: NSWorkspace.OpenConfiguration()) { _, error in
+                #if DEBUG
                 if let error { print("launch failed: \(error)") }
+                #endif
             }
         } else {
             NSWorkspace.shared.open(url)

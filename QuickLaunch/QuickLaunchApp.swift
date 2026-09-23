@@ -21,127 +21,86 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var window: KeyableWindow?
     var statusItem: NSStatusItem?
     var searchViewModel = SearchViewModel()
-    var eventMonitor: Any?
-    var globalEventMonitor: Any?
     var hotKeyRef: EventHotKeyRef?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
-            button.action = #selector(menuBarClicked)
-            button.target = self
-        }
-        
+        setupStatusItem()
         createWindow()
-        
-        // Delay permission check and hotkey setup slightly to let macOS catch up
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.checkAccessibilityPermissions()
-            self.setupHotkey()
-        }
+        setupHotkey()
     }
     
-    func checkAccessibilityPermissions() {
-        // Check multiple times as macOS can be slow to report
-        let accessEnabled = AXIsProcessTrusted()
+    // MARK: - Menu bar
+    
+    func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem?.button?.image = NSImage(systemSymbolName: "magnifyingglass",
+                                            accessibilityDescription: "QuickLaunch")
         
-        print("🔍 Accessibility check attempt 1: \(accessEnabled)")
+        let menu = NSMenu()
         
-        if !accessEnabled {
-            // Try one more time after a brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                let recheckEnabled = AXIsProcessTrusted()
-                print("🔍 Accessibility check attempt 2: \(recheckEnabled)")
-                
-                if !recheckEnabled {
-                    print("⚠️ Accessibility permissions not granted (or macOS hasn't recognized them yet)")
-                    print("⚠️ This is normal during development when running from Xcode")
-                    print("💡 Try the hotkey anyway - it might still work!")
-                    
-                    // Uncomment this block if you want to show the alert to end users
-                    /*
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        let alert = NSAlert()
-                        alert.messageText = "Accessibility Permission Required"
-                        alert.informativeText = "QuickLaunch needs accessibility permissions to register the global hotkey (⌘⇧Space).\n\nIf you already granted permission, try removing QuickLaunch from System Settings > Privacy & Security > Accessibility and adding it again, then restart the app."
-                        alert.alertStyle = .warning
-                        alert.addButton(withTitle: "Open System Settings")
-                        alert.addButton(withTitle: "Ignore (Try Hotkey Anyway)")
-                        
-                        if alert.runModal() == .alertFirstButtonReturn {
-                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
-                        }
-                    }
-                    */
-                } else {
-                    print("✅ Accessibility permissions granted (on recheck)")
-                }
-            }
-        } else {
-            print("✅ Accessibility permissions granted")
-        }
+        let openItem = NSMenuItem(title: "Open QuickLaunch", action: #selector(openFromMenu), keyEquivalent: "")
+        openItem.target = self
+        
+        let quitItem = NSMenuItem(title: "Quit QuickLaunch", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        
+        menu.addItem(openItem)
+        menu.addItem(.separator())
+        menu.addItem(quitItem)
+        statusItem?.menu = menu
     }
+    
+    @objc func openFromMenu() {
+        showWindow()
+    }
+    
+    @objc func quitApp() {
+        NSApp.terminate(nil)
+    }
+    
+    // MARK: - Global hotkey (⌘⇧Space)
     
     func setupHotkey() {
-        print("🔥 Setting up global hotkey (⌘⇧Space)")
-        
-        // Unregister existing hotkey if any
-        if let hotKeyRef = hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-            print("🗑️ Unregistered old hotkey")
+        if let existing = hotKeyRef {
+            UnregisterEventHotKey(existing)
+            hotKeyRef = nil
         }
         
-        // Remove existing monitors if any
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
-        }
-        if let monitor = globalEventMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalEventMonitor = nil
-        }
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
         
-        // Use Carbon Event Manager for global hotkey (more reliable)
+        // Carbon callbacks are C function pointers, so AppDelegate is passed in via userData
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData -> OSStatus in
+            guard let userData = userData else { return OSStatus(eventNotHandledErr) }
+            let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async {
+                appDelegate.toggleWindow()
+            }
+            return noErr
+        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
+        
         var hotKeyID = EventHotKeyID()
         hotKeyID.signature = OSType("QLCH".fourCharCodeValue)
         hotKeyID.id = 1
         
-        var eventHandler: EventHandlerRef?
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        
-        InstallEventHandler(GetApplicationEventTarget(), { (_, event, userData) -> OSStatus in
-            guard let userData = userData else { return OSStatus(eventNotHandledErr) }
-            let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-            
-            var hotKeyID = EventHotKeyID()
-            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
-            
-            print("🎯 Carbon hotkey triggered!")
-            DispatchQueue.main.async {
-                appDelegate.toggleWindow()
-            }
-            
-            return noErr
-        }, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
-        
-        // Register ⌘⇧Space (keyCode 49 = Space)
-        let keyCode: UInt32 = 49
-        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        let keyCode: UInt32 = 49  // Space
+        let modifiers = UInt32(cmdKey | shiftKey)
         
         var newHotKeyRef: EventHotKeyRef?
-        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &newHotKeyRef)
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID,
+                                         GetApplicationEventTarget(), 0, &newHotKeyRef)
         
         if status == noErr {
             hotKeyRef = newHotKeyRef
-            print("✅ Carbon hotkey registered successfully")
         } else {
-            print("❌ Failed to register Carbon hotkey with status: \(status)")
+            #if DEBUG
+            print("Failed to register hotkey, status: \(status)")
+            #endif
         }
     }
+    
+    // MARK: - Window
     
     func createWindow() {
         window = KeyableWindow(
@@ -157,10 +116,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window?.isReleasedWhenClosed = false
         window?.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
-        let contentView = SearchView(viewModel: searchViewModel, onEscape: { self.hideWindow() })
+        let contentView = SearchView(viewModel: searchViewModel, onEscape: { [weak self] in
+            self?.hideWindow()
+        })
         window?.contentView = NSHostingView(rootView: contentView)
         
-        // Hide window when it loses focus (user clicks elsewhere)
+        // Hide when the user clicks anywhere else
         NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
             object: window,
@@ -168,10 +129,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             self?.hideWindow()
         }
-    }
-    
-    @objc func menuBarClicked() {
-        toggleWindow()
     }
     
     func toggleWindow() {
@@ -191,7 +148,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let windowWidth: CGFloat = 600
             let windowHeight: CGFloat = 400
             
-            // Center horizontally, place in upper third vertically
+            // Centered horizontally, in the upper part of the screen
             let x = screenFrame.origin.x + (screenFrame.width - windowWidth) / 2
             let y = screenFrame.origin.y + screenFrame.height - windowHeight - (screenFrame.height * 0.2)
             
@@ -208,10 +165,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window?.orderOut(nil)
     }
 }
-// Helper extension for converting string to FourCharCode
+
+// MARK: - Helpers
+
 extension String {
+    /// Packs up to 4 ASCII characters into a FourCharCode (used for the hotkey signature)
     var fourCharCodeValue: Int {
-        var result: Int = 0
+        var result = 0
         if let data = self.data(using: .macOSRoman) {
             data.withUnsafeBytes { bytes in
                 for i in 0..<min(4, data.count) {
