@@ -69,14 +69,6 @@ QuickLaunch/
 └── Models.swift            # AppInfo, ClipboardItem, SearchMode, etc.
 ```
 
-## Roadmap
-
-- [ ] Move Spotlight queries off the main thread with debounced async search
-- [ ] Configurable hotkey
-- [ ] Persist clipboard history
-- [ ] Custom web search engines
-- [ ] Launch at login
-
 ## License
 
 MIT
